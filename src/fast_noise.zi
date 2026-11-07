@@ -1,0 +1,505 @@
+// FastNoiseLite gradient noise in pure Ziran: OpenSimplex2, OpenSimplex2S,
+// Perlin, ValueCubic and Value, with FBm, Ridged and PingPong fractals.
+// Ported from FastNoiseLite 1.1 (MIT, Copyright (c) 2023 Jordan Peck and
+// contributors, see LICENSE). Every call reads the state only, so one state
+// can be shared between threads. Results follow the C float32 implementation.
+
+NoiseType :: enum { OpenSimplex2; OpenSimplex2S; Perlin; ValueCubic; Value; }
+FractalType :: enum { None; FBm; Ridged; PingPong; }
+RotationType3D :: enum { None; ImproveXYPlanes; ImproveXZPlanes; }
+
+NoiseState :: struct {
+    seed: s32;
+    frequency: float32;
+    noise_type: NoiseType;
+    rotation_type_3d: RotationType3D;
+    fractal_type: FractalType;
+    octaves: s32;
+    lacunarity: float32;
+    gain: float32;
+    weighted_strength: float32;
+    ping_pong_strength: float32;
+}
+
+// FastNoiseLite's defaults: seed 1337, frequency 0.01, OpenSimplex2, no
+// fractal, 3 octaves, lacunarity 2, gain 0.5, ping-pong strength 2.
+NoiseCreate :: () -> NoiseState {
+    state: NoiseState
+    state.seed = 1337
+    state.frequency = 0.01
+    state.noise_type = NoiseType.OpenSimplex2
+    state.rotation_type_3d = RotationType3D.None
+    state.fractal_type = FractalType.None
+    state.octaves = 3
+    state.lacunarity = 2.0
+    state.gain = 0.5
+    state.weighted_strength = 0.0
+    state.ping_pong_strength = 2.0
+    return state
+}
+
+Gradients2D: [256]float32 = .{
+    0.130526192220052, 0.99144486137381, 0.38268343236509, 0.923879532511287, 0.608761429008721, 0.793353340291235, 0.793353340291235, 0.608761429008721,
+    0.923879532511287, 0.38268343236509, 0.99144486137381, 0.130526192220051, 0.99144486137381, -0.130526192220051, 0.923879532511287, -0.38268343236509,
+    0.793353340291235, -0.60876142900872, 0.608761429008721, -0.793353340291235, 0.38268343236509, -0.923879532511287, 0.130526192220052, -0.99144486137381,
+    -0.130526192220052, -0.99144486137381, -0.38268343236509, -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509, -0.99144486137381, -0.130526192220052, -0.99144486137381, 0.130526192220051, -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721, -0.608761429008721, 0.793353340291235, -0.38268343236509, 0.923879532511287, -0.130526192220052, 0.99144486137381,
+    0.130526192220052, 0.99144486137381, 0.38268343236509, 0.923879532511287, 0.608761429008721, 0.793353340291235, 0.793353340291235, 0.608761429008721,
+    0.923879532511287, 0.38268343236509, 0.99144486137381, 0.130526192220051, 0.99144486137381, -0.130526192220051, 0.923879532511287, -0.38268343236509,
+    0.793353340291235, -0.60876142900872, 0.608761429008721, -0.793353340291235, 0.38268343236509, -0.923879532511287, 0.130526192220052, -0.99144486137381,
+    -0.130526192220052, -0.99144486137381, -0.38268343236509, -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509, -0.99144486137381, -0.130526192220052, -0.99144486137381, 0.130526192220051, -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721, -0.608761429008721, 0.793353340291235, -0.38268343236509, 0.923879532511287, -0.130526192220052, 0.99144486137381,
+    0.130526192220052, 0.99144486137381, 0.38268343236509, 0.923879532511287, 0.608761429008721, 0.793353340291235, 0.793353340291235, 0.608761429008721,
+    0.923879532511287, 0.38268343236509, 0.99144486137381, 0.130526192220051, 0.99144486137381, -0.130526192220051, 0.923879532511287, -0.38268343236509,
+    0.793353340291235, -0.60876142900872, 0.608761429008721, -0.793353340291235, 0.38268343236509, -0.923879532511287, 0.130526192220052, -0.99144486137381,
+    -0.130526192220052, -0.99144486137381, -0.38268343236509, -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509, -0.99144486137381, -0.130526192220052, -0.99144486137381, 0.130526192220051, -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721, -0.608761429008721, 0.793353340291235, -0.38268343236509, 0.923879532511287, -0.130526192220052, 0.99144486137381,
+    0.130526192220052, 0.99144486137381, 0.38268343236509, 0.923879532511287, 0.608761429008721, 0.793353340291235, 0.793353340291235, 0.608761429008721,
+    0.923879532511287, 0.38268343236509, 0.99144486137381, 0.130526192220051, 0.99144486137381, -0.130526192220051, 0.923879532511287, -0.38268343236509,
+    0.793353340291235, -0.60876142900872, 0.608761429008721, -0.793353340291235, 0.38268343236509, -0.923879532511287, 0.130526192220052, -0.99144486137381,
+    -0.130526192220052, -0.99144486137381, -0.38268343236509, -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509, -0.99144486137381, -0.130526192220052, -0.99144486137381, 0.130526192220051, -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721, -0.608761429008721, 0.793353340291235, -0.38268343236509, 0.923879532511287, -0.130526192220052, 0.99144486137381,
+    0.130526192220052, 0.99144486137381, 0.38268343236509, 0.923879532511287, 0.608761429008721, 0.793353340291235, 0.793353340291235, 0.608761429008721,
+    0.923879532511287, 0.38268343236509, 0.99144486137381, 0.130526192220051, 0.99144486137381, -0.130526192220051, 0.923879532511287, -0.38268343236509,
+    0.793353340291235, -0.60876142900872, 0.608761429008721, -0.793353340291235, 0.38268343236509, -0.923879532511287, 0.130526192220052, -0.99144486137381,
+    -0.130526192220052, -0.99144486137381, -0.38268343236509, -0.923879532511287, -0.608761429008721, -0.793353340291235, -0.793353340291235, -0.608761429008721,
+    -0.923879532511287, -0.38268343236509, -0.99144486137381, -0.130526192220052, -0.99144486137381, 0.130526192220051, -0.923879532511287, 0.38268343236509,
+    -0.793353340291235, 0.608761429008721, -0.608761429008721, 0.793353340291235, -0.38268343236509, 0.923879532511287, -0.130526192220052, 0.99144486137381,
+    0.38268343236509, 0.923879532511287, 0.923879532511287, 0.38268343236509, 0.923879532511287, -0.38268343236509, 0.38268343236509, -0.923879532511287,
+    -0.38268343236509, -0.923879532511287, -0.923879532511287, -0.38268343236509, -0.923879532511287, 0.38268343236509, -0.38268343236509, 0.923879532511287
+};
+Gradients3D: [256]float32 = .{
+    0, 1, 1, 0, 0, -1, 1, 0,
+    0, 1, -1, 0, 0, -1, -1, 0,
+    1, 0, 1, 0, -1, 0, 1, 0,
+    1, 0, -1, 0, -1, 0, -1, 0,
+    1, 1, 0, 0, -1, 1, 0, 0,
+    1, -1, 0, 0, -1, -1, 0, 0,
+    0, 1, 1, 0, 0, -1, 1, 0,
+    0, 1, -1, 0, 0, -1, -1, 0,
+    1, 0, 1, 0, -1, 0, 1, 0,
+    1, 0, -1, 0, -1, 0, -1, 0,
+    1, 1, 0, 0, -1, 1, 0, 0,
+    1, -1, 0, 0, -1, -1, 0, 0,
+    0, 1, 1, 0, 0, -1, 1, 0,
+    0, 1, -1, 0, 0, -1, -1, 0,
+    1, 0, 1, 0, -1, 0, 1, 0,
+    1, 0, -1, 0, -1, 0, -1, 0,
+    1, 1, 0, 0, -1, 1, 0, 0,
+    1, -1, 0, 0, -1, -1, 0, 0,
+    0, 1, 1, 0, 0, -1, 1, 0,
+    0, 1, -1, 0, 0, -1, -1, 0,
+    1, 0, 1, 0, -1, 0, 1, 0,
+    1, 0, -1, 0, -1, 0, -1, 0,
+    1, 1, 0, 0, -1, 1, 0, 0,
+    1, -1, 0, 0, -1, -1, 0, 0,
+    0, 1, 1, 0, 0, -1, 1, 0,
+    0, 1, -1, 0, 0, -1, -1, 0,
+    1, 0, 1, 0, -1, 0, 1, 0,
+    1, 0, -1, 0, -1, 0, -1, 0,
+    1, 1, 0, 0, -1, 1, 0, 0,
+    1, -1, 0, 0, -1, -1, 0, 0,
+    1, 1, 0, 0, 0, -1, 1, 0,
+    -1, 1, 0, 0, 0, -1, -1, 0
+};
+
+PRIME_X :: 501125321;
+PRIME_Y :: 1136930381;
+PRIME_Z :: 1720413743;
+// The primes doubled, wrapped to s32 as FastNoiseLite's int shifts do.
+PRIME_X2 :: 1002250642;
+PRIME_Y2 :: -2021106534;
+PRIME_Z2 :: -854139810;
+
+Min :: (a: float32, b: float32) -> float32 { if a < b { return a }; return b }
+Abs :: (f: float32) -> float32 { if f < 0 { return -f }; return f }
+// FastNoiseLite's floor and round: negative integers step down one more,
+// which the generated lattice depends on.
+FastFloor :: (f: float32) -> s32 { if f >= 0 { return cast(s32) f }; return cast(s32) f - 1 }
+FastRound :: (f: float32) -> s32 { if f >= 0 { return cast(s32) (f + 0.5) }; return cast(s32) (f - 0.5) }
+Lerp :: (a: float32, b: float32, t: float32) -> float32 { return a + t * (b - a) }
+InterpHermite :: (t: float32) -> float32 { return t * t * (3 - 2 * t) }
+InterpQuintic :: (t: float32) -> float32 { return t * t * t * (t * (t * 6 - 15) + 10) }
+CubicLerp :: (a: float32, b: float32, c: float32, d: float32, t: float32) -> float32 {
+    p := (d - c) - (a - b)
+    return t * t * t * p + t * t * ((a - b) - p) + t * (c - a) + b
+}
+PingPong :: (value: float32) -> float32 {
+    t := value - cast(float32) (cast(s32) (value * 0.5) * 2)
+    if t < 1 { return t }; return 2 - t
+}
+FractalBounding :: (state: *NoiseState) -> float32 {
+    gain := Abs(state.gain); amp := gain; fractal: float32 = 1.0; i: s32 = 1
+    while i < state.octaves { fractal += amp; amp *= gain; i += 1 }
+    return 1.0 / fractal
+}
+
+Hash2D :: (seed: s32, x: s32, y: s32) -> s32 { return (seed ^ x ^ y) * 0x27d4eb2d }
+Hash3D :: (seed: s32, x: s32, y: s32, z: s32) -> s32 { return (seed ^ x ^ y ^ z) * 0x27d4eb2d }
+ValCoord2D :: (seed: s32, x: s32, y: s32) -> float32 {
+    hash := Hash2D(seed, x, y); hash *= hash; hash ^= hash << 19
+    return cast(float32) hash * (1.0 / 2147483648.0)
+}
+ValCoord3D :: (seed: s32, x: s32, y: s32, z: s32) -> float32 {
+    hash := Hash3D(seed, x, y, z); hash *= hash; hash ^= hash << 19
+    return cast(float32) hash * (1.0 / 2147483648.0)
+}
+GradCoord2D :: (seed: s32, x: s32, y: s32, xd: float32, yd: float32) -> float32 {
+    hash := Hash2D(seed, x, y); hash ^= hash >> 15; hash &= 127 << 1
+    return xd * Gradients2D[hash] + yd * Gradients2D[hash | 1]
+}
+GradCoord3D :: (seed: s32, x: s32, y: s32, z: s32, xd: float32, yd: float32, zd: float32) -> float32 {
+    hash := Hash3D(seed, x, y, z); hash ^= hash >> 15; hash &= 63 << 2
+    return xd * Gradients3D[hash] + yd * Gradients3D[hash | 1] + zd * Gradients3D[hash | 2]
+}
+
+// OpenSimplex2 in 2D is ordinary simplex noise on the skewed coordinates.
+Simplex2D :: (seed: s32, x: float32, y: float32) -> float32 {
+    SQRT3: float32 = 1.7320508075688772935274463415059
+    G2 := (3 - SQRT3) / 6
+    i := FastFloor(x); j := FastFloor(y)
+    xi := x - cast(float32) i; yi := y - cast(float32) j
+    t := (xi + yi) * G2; x0 := xi - t; y0 := yi - t
+    i *= PRIME_X; j *= PRIME_Y
+    n0: float32 = 0; n1: float32 = 0; n2: float32 = 0
+    a := 0.5 - x0 * x0 - y0 * y0
+    if a > 0 { n0 = (a * a) * (a * a) * GradCoord2D(seed, i, j, x0, y0) }
+    c := (2 * (1 - 2 * G2) * (1 / G2 - 2)) * t + ((-2 * (1 - 2 * G2) * (1 - 2 * G2)) + a)
+    if c > 0 {
+        x2 := x0 + (2 * G2 - 1); y2 := y0 + (2 * G2 - 1)
+        n2 = (c * c) * (c * c) * GradCoord2D(seed, i + PRIME_X, j + PRIME_Y, x2, y2)
+    }
+    if y0 > x0 {
+        x1 := x0 + G2; y1 := y0 + (G2 - 1); b := 0.5 - x1 * x1 - y1 * y1
+        if b > 0 { n1 = (b * b) * (b * b) * GradCoord2D(seed, i, j + PRIME_Y, x1, y1) }
+    } else {
+        x1 := x0 + (G2 - 1); y1 := y0 + G2; b := 0.5 - x1 * x1 - y1 * y1
+        if b > 0 { n1 = (b * b) * (b * b) * GradCoord2D(seed, i + PRIME_X, j, x1, y1) }
+    }
+    return (n0 + n1 + n2) * 99.83685446303647
+}
+
+// OpenSimplex2 in 3D: two offset, rotated cube grids.
+OpenSimplex23D :: (seed: s32, x: float32, y: float32, z: float32) -> float32 {
+    i := FastRound(x); j := FastRound(y); k := FastRound(z)
+    x0 := x - cast(float32) i; y0 := y - cast(float32) j; z0 := z - cast(float32) k
+    xNSign := cast(s32) (-1.0 - x0) | 1; yNSign := cast(s32) (-1.0 - y0) | 1; zNSign := cast(s32) (-1.0 - z0) | 1
+    ax0 := cast(float32) xNSign * -x0; ay0 := cast(float32) yNSign * -y0; az0 := cast(float32) zNSign * -z0
+    i *= PRIME_X; j *= PRIME_Y; k *= PRIME_Z
+    s := seed; value: float32 = 0
+    a := (0.6 - x0 * x0) - (y0 * y0 + z0 * z0)
+    l: s32 = 0
+    while true {
+        if a > 0 { value += (a * a) * (a * a) * GradCoord3D(s, i, j, k, x0, y0, z0) }
+        b := a + 1; i1 := i; j1 := j; k1 := k; x1 := x0; y1 := y0; z1 := z0
+        if ax0 >= ay0 && ax0 >= az0 {
+            x1 += cast(float32) xNSign; b -= cast(float32) (xNSign * 2) * x1; i1 -= xNSign * PRIME_X
+        } else if ay0 > ax0 && ay0 >= az0 {
+            y1 += cast(float32) yNSign; b -= cast(float32) (yNSign * 2) * y1; j1 -= yNSign * PRIME_Y
+        } else {
+            z1 += cast(float32) zNSign; b -= cast(float32) (zNSign * 2) * z1; k1 -= zNSign * PRIME_Z
+        }
+        if b > 0 { value += (b * b) * (b * b) * GradCoord3D(s, i1, j1, k1, x1, y1, z1) }
+        if l == 1 { break }
+        ax0 = 0.5 - ax0; ay0 = 0.5 - ay0; az0 = 0.5 - az0
+        x0 = cast(float32) xNSign * ax0; y0 = cast(float32) yNSign * ay0; z0 = cast(float32) zNSign * az0
+        a += (0.75 - ax0) - (ay0 + az0)
+        i += (xNSign >> 1) & PRIME_X; j += (yNSign >> 1) & PRIME_Y; k += (zNSign >> 1) & PRIME_Z
+        xNSign = -xNSign; yNSign = -yNSign; zNSign = -zNSign
+        s = ~s; l += 1
+    }
+    return value * 32.69428253173828125
+}
+
+// OpenSimplex2S in 2D: a smoother simplex variant with a wider kernel.
+OpenSimplex2S2D :: (seed: s32, x: float32, y: float32) -> float32 {
+    SQRT3: float32 = 1.7320508075688772935274463415059
+    G2 := (3 - SQRT3) / 6
+    i := FastFloor(x); j := FastFloor(y)
+    xi := x - cast(float32) i; yi := y - cast(float32) j
+    i *= PRIME_X; j *= PRIME_Y
+    i1 := i + PRIME_X; j1 := j + PRIME_Y
+    t := (xi + yi) * G2; x0 := xi - t; y0 := yi - t
+    a0 := (2.0 / 3.0) - x0 * x0 - y0 * y0
+    value := (a0 * a0) * (a0 * a0) * GradCoord2D(seed, i, j, x0, y0)
+    a1 := (2 * (1 - 2 * G2) * (1 / G2 - 2)) * t + ((-2 * (1 - 2 * G2) * (1 - 2 * G2)) + a0)
+    x1 := x0 - (1 - 2 * G2); y1 := y0 - (1 - 2 * G2)
+    value += (a1 * a1) * (a1 * a1) * GradCoord2D(seed, i1, j1, x1, y1)
+    xmyi := xi - yi
+    if t > G2 {
+        if xi + xmyi > 1 {
+            x2 := x0 + (3 * G2 - 2); y2 := y0 + (3 * G2 - 1); a2 := (2.0 / 3.0) - x2 * x2 - y2 * y2
+            if a2 > 0 { value += (a2 * a2) * (a2 * a2) * GradCoord2D(seed, i + PRIME_X2, j + PRIME_Y, x2, y2) }
+        } else {
+            x2 := x0 + G2; y2 := y0 + (G2 - 1); a2 := (2.0 / 3.0) - x2 * x2 - y2 * y2
+            if a2 > 0 { value += (a2 * a2) * (a2 * a2) * GradCoord2D(seed, i, j + PRIME_Y, x2, y2) }
+        }
+        if yi - xmyi > 1 {
+            x3 := x0 + (3 * G2 - 1); y3 := y0 + (3 * G2 - 2); a3 := (2.0 / 3.0) - x3 * x3 - y3 * y3
+            if a3 > 0 { value += (a3 * a3) * (a3 * a3) * GradCoord2D(seed, i + PRIME_X, j + PRIME_Y2, x3, y3) }
+        } else {
+            x3 := x0 + (G2 - 1); y3 := y0 + G2; a3 := (2.0 / 3.0) - x3 * x3 - y3 * y3
+            if a3 > 0 { value += (a3 * a3) * (a3 * a3) * GradCoord2D(seed, i + PRIME_X, j, x3, y3) }
+        }
+    } else {
+        if xi + xmyi < 0 {
+            x2 := x0 + (1 - G2); y2 := y0 - G2; a2 := (2.0 / 3.0) - x2 * x2 - y2 * y2
+            if a2 > 0 { value += (a2 * a2) * (a2 * a2) * GradCoord2D(seed, i - PRIME_X, j, x2, y2) }
+        } else {
+            x2 := x0 + (G2 - 1); y2 := y0 + G2; a2 := (2.0 / 3.0) - x2 * x2 - y2 * y2
+            if a2 > 0 { value += (a2 * a2) * (a2 * a2) * GradCoord2D(seed, i + PRIME_X, j, x2, y2) }
+        }
+        if yi < xmyi {
+            x2 := x0 - G2; y2 := y0 - (G2 - 1); a2 := (2.0 / 3.0) - x2 * x2 - y2 * y2
+            if a2 > 0 { value += (a2 * a2) * (a2 * a2) * GradCoord2D(seed, i, j - PRIME_Y, x2, y2) }
+        } else {
+            x2 := x0 + G2; y2 := y0 + (G2 - 1); a2 := (2.0 / 3.0) - x2 * x2 - y2 * y2
+            if a2 > 0 { value += (a2 * a2) * (a2 * a2) * GradCoord2D(seed, i, j + PRIME_Y, x2, y2) }
+        }
+    }
+    return value * 18.24196194486065
+}
+
+// OpenSimplex2S in 3D: two offset, rotated cube grids with a wider kernel.
+OpenSimplex2S3D :: (seed: s32, x: float32, y: float32, z: float32) -> float32 {
+    i := FastFloor(x); j := FastFloor(y); k := FastFloor(z)
+    xi := x - cast(float32) i; yi := y - cast(float32) j; zi := z - cast(float32) k
+    i *= PRIME_X; j *= PRIME_Y; k *= PRIME_Z
+    seed2 := seed + 1293373
+    xNMask := cast(s32) (-0.5 - xi); yNMask := cast(s32) (-0.5 - yi); zNMask := cast(s32) (-0.5 - zi)
+    x0 := xi + cast(float32) xNMask; y0 := yi + cast(float32) yNMask; z0 := zi + cast(float32) zNMask
+    a0 := 0.75 - x0 * x0 - y0 * y0 - z0 * z0
+    value := (a0 * a0) * (a0 * a0) * GradCoord3D(seed, i + (xNMask & PRIME_X), j + (yNMask & PRIME_Y), k + (zNMask & PRIME_Z), x0, y0, z0)
+    x1 := xi - 0.5; y1 := yi - 0.5; z1 := zi - 0.5
+    a1 := 0.75 - x1 * x1 - y1 * y1 - z1 * z1
+    value += (a1 * a1) * (a1 * a1) * GradCoord3D(seed2, i + PRIME_X, j + PRIME_Y, k + PRIME_Z, x1, y1, z1)
+    xSign := cast(float32) (xNMask | 1); ySign := cast(float32) (yNMask | 1); zSign := cast(float32) (zNMask | 1)
+    xAFlipMask0 := cast(float32) ((xNMask | 1) << 1) * x1
+    yAFlipMask0 := cast(float32) ((yNMask | 1) << 1) * y1
+    zAFlipMask0 := cast(float32) ((zNMask | 1) << 1) * z1
+    xAFlipMask1 := cast(float32) (-2 - (xNMask << 2)) * x1 - 1.0
+    yAFlipMask1 := cast(float32) (-2 - (yNMask << 2)) * y1 - 1.0
+    zAFlipMask1 := cast(float32) (-2 - (zNMask << 2)) * z1 - 1.0
+
+    skip5 := false
+    a2 := xAFlipMask0 + a0
+    if a2 > 0 {
+        value += (a2 * a2) * (a2 * a2) * GradCoord3D(seed, i + (~xNMask & PRIME_X), j + (yNMask & PRIME_Y), k + (zNMask & PRIME_Z), x0 - xSign, y0, z0)
+    } else {
+        a3 := yAFlipMask0 + zAFlipMask0 + a0
+        if a3 > 0 { value += (a3 * a3) * (a3 * a3) * GradCoord3D(seed, i + (xNMask & PRIME_X), j + (~yNMask & PRIME_Y), k + (~zNMask & PRIME_Z), x0, y0 - ySign, z0 - zSign) }
+        a4 := xAFlipMask1 + a1
+        if a4 > 0 {
+            value += (a4 * a4) * (a4 * a4) * GradCoord3D(seed2, i + (xNMask & PRIME_X2), j + PRIME_Y, k + PRIME_Z, xSign + x1, y1, z1)
+            skip5 = true
+        }
+    }
+
+    skip9 := false
+    a6 := yAFlipMask0 + a0
+    if a6 > 0 {
+        value += (a6 * a6) * (a6 * a6) * GradCoord3D(seed, i + (xNMask & PRIME_X), j + (~yNMask & PRIME_Y), k + (zNMask & PRIME_Z), x0, y0 - ySign, z0)
+    } else {
+        a7 := xAFlipMask0 + zAFlipMask0 + a0
+        if a7 > 0 { value += (a7 * a7) * (a7 * a7) * GradCoord3D(seed, i + (~xNMask & PRIME_X), j + (yNMask & PRIME_Y), k + (~zNMask & PRIME_Z), x0 - xSign, y0, z0 - zSign) }
+        a8 := yAFlipMask1 + a1
+        if a8 > 0 {
+            value += (a8 * a8) * (a8 * a8) * GradCoord3D(seed2, i + PRIME_X, j + (yNMask & PRIME_Y2), k + PRIME_Z, x1, ySign + y1, z1)
+            skip9 = true
+        }
+    }
+
+    skipD := false
+    aA := zAFlipMask0 + a0
+    if aA > 0 {
+        value += (aA * aA) * (aA * aA) * GradCoord3D(seed, i + (xNMask & PRIME_X), j + (yNMask & PRIME_Y), k + (~zNMask & PRIME_Z), x0, y0, z0 - zSign)
+    } else {
+        aB := xAFlipMask0 + yAFlipMask0 + a0
+        if aB > 0 { value += (aB * aB) * (aB * aB) * GradCoord3D(seed, i + (~xNMask & PRIME_X), j + (~yNMask & PRIME_Y), k + (zNMask & PRIME_Z), x0 - xSign, y0 - ySign, z0) }
+        aC := zAFlipMask1 + a1
+        if aC > 0 {
+            value += (aC * aC) * (aC * aC) * GradCoord3D(seed2, i + PRIME_X, j + PRIME_Y, k + (zNMask & PRIME_Z2), x1, y1, zSign + z1)
+            skipD = true
+        }
+    }
+
+    if !skip5 {
+        a5 := yAFlipMask1 + zAFlipMask1 + a1
+        if a5 > 0 { value += (a5 * a5) * (a5 * a5) * GradCoord3D(seed2, i + PRIME_X, j + (yNMask & PRIME_Y2), k + (zNMask & PRIME_Z2), x1, ySign + y1, zSign + z1) }
+    }
+    if !skip9 {
+        a9 := xAFlipMask1 + zAFlipMask1 + a1
+        if a9 > 0 { value += (a9 * a9) * (a9 * a9) * GradCoord3D(seed2, i + (xNMask & PRIME_X2), j + PRIME_Y, k + (zNMask & PRIME_Z2), xSign + x1, y1, zSign + z1) }
+    }
+    if !skipD {
+        aD := xAFlipMask1 + yAFlipMask1 + a1
+        if aD > 0 { value += (aD * aD) * (aD * aD) * GradCoord3D(seed2, i + (xNMask & PRIME_X2), j + (yNMask & PRIME_Y2), k + PRIME_Z, xSign + x1, ySign + y1, z1) }
+    }
+    return value * 9.046026385208288
+}
+
+Perlin2D :: (seed: s32, x: float32, y: float32) -> float32 {
+    x0 := FastFloor(x); y0 := FastFloor(y)
+    xd0 := x - cast(float32) x0; yd0 := y - cast(float32) y0; xd1 := xd0 - 1; yd1 := yd0 - 1
+    xs := InterpQuintic(xd0); ys := InterpQuintic(yd0)
+    x0 *= PRIME_X; y0 *= PRIME_Y; x1 := x0 + PRIME_X; y1 := y0 + PRIME_Y
+    xf0 := Lerp(GradCoord2D(seed, x0, y0, xd0, yd0), GradCoord2D(seed, x1, y0, xd1, yd0), xs)
+    xf1 := Lerp(GradCoord2D(seed, x0, y1, xd0, yd1), GradCoord2D(seed, x1, y1, xd1, yd1), xs)
+    return Lerp(xf0, xf1, ys) * 1.4247691104677813
+}
+
+Perlin3D :: (seed: s32, x: float32, y: float32, z: float32) -> float32 {
+    x0 := FastFloor(x); y0 := FastFloor(y); z0 := FastFloor(z)
+    xd0 := x - cast(float32) x0; yd0 := y - cast(float32) y0; zd0 := z - cast(float32) z0
+    xd1 := xd0 - 1; yd1 := yd0 - 1; zd1 := zd0 - 1
+    xs := InterpQuintic(xd0); ys := InterpQuintic(yd0); zs := InterpQuintic(zd0)
+    x0 *= PRIME_X; y0 *= PRIME_Y; z0 *= PRIME_Z; x1 := x0 + PRIME_X; y1 := y0 + PRIME_Y; z1 := z0 + PRIME_Z
+    xf00 := Lerp(GradCoord3D(seed, x0, y0, z0, xd0, yd0, zd0), GradCoord3D(seed, x1, y0, z0, xd1, yd0, zd0), xs)
+    xf10 := Lerp(GradCoord3D(seed, x0, y1, z0, xd0, yd1, zd0), GradCoord3D(seed, x1, y1, z0, xd1, yd1, zd0), xs)
+    xf01 := Lerp(GradCoord3D(seed, x0, y0, z1, xd0, yd0, zd1), GradCoord3D(seed, x1, y0, z1, xd1, yd0, zd1), xs)
+    xf11 := Lerp(GradCoord3D(seed, x0, y1, z1, xd0, yd1, zd1), GradCoord3D(seed, x1, y1, z1, xd1, yd1, zd1), xs)
+    return Lerp(Lerp(xf00, xf10, ys), Lerp(xf01, xf11, ys), zs) * 0.964921414852142333984375
+}
+
+ValueCubicRow2D :: (seed: s32, x0: s32, x1: s32, x2: s32, x3: s32, y: s32, t: float32) -> float32 {
+    return CubicLerp(ValCoord2D(seed, x0, y), ValCoord2D(seed, x1, y), ValCoord2D(seed, x2, y), ValCoord2D(seed, x3, y), t)
+}
+
+ValueCubic2D :: (seed: s32, x: float32, y: float32) -> float32 {
+    x1 := FastFloor(x); y1 := FastFloor(y)
+    xs := x - cast(float32) x1; ys := y - cast(float32) y1
+    x1 *= PRIME_X; y1 *= PRIME_Y
+    x0 := x1 - PRIME_X; y0 := y1 - PRIME_Y; x2 := x1 + PRIME_X; y2 := y1 + PRIME_Y; x3 := x1 + PRIME_X2; y3 := y1 + PRIME_Y2
+    return CubicLerp(ValueCubicRow2D(seed, x0, x1, x2, x3, y0, xs), ValueCubicRow2D(seed, x0, x1, x2, x3, y1, xs),
+                     ValueCubicRow2D(seed, x0, x1, x2, x3, y2, xs), ValueCubicRow2D(seed, x0, x1, x2, x3, y3, xs), ys) * (1 / (1.5 * 1.5))
+}
+
+ValueCubicRow3D :: (seed: s32, x0: s32, x1: s32, x2: s32, x3: s32, y: s32, z: s32, t: float32) -> float32 {
+    return CubicLerp(ValCoord3D(seed, x0, y, z), ValCoord3D(seed, x1, y, z), ValCoord3D(seed, x2, y, z), ValCoord3D(seed, x3, y, z), t)
+}
+
+ValueCubicPlane3D :: (seed: s32, x0: s32, x1: s32, x2: s32, x3: s32, y0: s32, y1: s32, y2: s32, y3: s32, z: s32, xs: float32, ys: float32) -> float32 {
+    return CubicLerp(ValueCubicRow3D(seed, x0, x1, x2, x3, y0, z, xs), ValueCubicRow3D(seed, x0, x1, x2, x3, y1, z, xs),
+                     ValueCubicRow3D(seed, x0, x1, x2, x3, y2, z, xs), ValueCubicRow3D(seed, x0, x1, x2, x3, y3, z, xs), ys)
+}
+
+ValueCubic3D :: (seed: s32, x: float32, y: float32, z: float32) -> float32 {
+    x1 := FastFloor(x); y1 := FastFloor(y); z1 := FastFloor(z)
+    xs := x - cast(float32) x1; ys := y - cast(float32) y1; zs := z - cast(float32) z1
+    x1 *= PRIME_X; y1 *= PRIME_Y; z1 *= PRIME_Z
+    x0 := x1 - PRIME_X; y0 := y1 - PRIME_Y; z0 := z1 - PRIME_Z
+    x2 := x1 + PRIME_X; y2 := y1 + PRIME_Y; z2 := z1 + PRIME_Z
+    x3 := x1 + PRIME_X2; y3 := y1 + PRIME_Y2; z3 := z1 + PRIME_Z2
+    return CubicLerp(ValueCubicPlane3D(seed, x0, x1, x2, x3, y0, y1, y2, y3, z0, xs, ys), ValueCubicPlane3D(seed, x0, x1, x2, x3, y0, y1, y2, y3, z1, xs, ys),
+                     ValueCubicPlane3D(seed, x0, x1, x2, x3, y0, y1, y2, y3, z2, xs, ys), ValueCubicPlane3D(seed, x0, x1, x2, x3, y0, y1, y2, y3, z3, xs, ys), zs) * (1 / (1.5 * 1.5 * 1.5))
+}
+
+Value2D :: (seed: s32, x: float32, y: float32) -> float32 {
+    x0 := FastFloor(x); y0 := FastFloor(y)
+    xs := InterpHermite(x - cast(float32) x0); ys := InterpHermite(y - cast(float32) y0)
+    x0 *= PRIME_X; y0 *= PRIME_Y; x1 := x0 + PRIME_X; y1 := y0 + PRIME_Y
+    xf0 := Lerp(ValCoord2D(seed, x0, y0), ValCoord2D(seed, x1, y0), xs)
+    xf1 := Lerp(ValCoord2D(seed, x0, y1), ValCoord2D(seed, x1, y1), xs)
+    return Lerp(xf0, xf1, ys)
+}
+
+Value3D :: (seed: s32, x: float32, y: float32, z: float32) -> float32 {
+    x0 := FastFloor(x); y0 := FastFloor(y); z0 := FastFloor(z)
+    xs := InterpHermite(x - cast(float32) x0); ys := InterpHermite(y - cast(float32) y0); zs := InterpHermite(z - cast(float32) z0)
+    x0 *= PRIME_X; y0 *= PRIME_Y; z0 *= PRIME_Z; x1 := x0 + PRIME_X; y1 := y0 + PRIME_Y; z1 := z0 + PRIME_Z
+    xf00 := Lerp(ValCoord3D(seed, x0, y0, z0), ValCoord3D(seed, x1, y0, z0), xs)
+    xf10 := Lerp(ValCoord3D(seed, x0, y1, z0), ValCoord3D(seed, x1, y1, z0), xs)
+    xf01 := Lerp(ValCoord3D(seed, x0, y0, z1), ValCoord3D(seed, x1, y0, z1), xs)
+    xf11 := Lerp(ValCoord3D(seed, x0, y1, z1), ValCoord3D(seed, x1, y1, z1), xs)
+    return Lerp(Lerp(xf00, xf10, ys), Lerp(xf01, xf11, ys), zs)
+}
+
+Single2D :: (state: *NoiseState, seed: s32, x: float32, y: float32) -> float32 {
+    kind := state.noise_type
+    if kind == NoiseType.OpenSimplex2 { return Simplex2D(seed, x, y) }
+    if kind == NoiseType.OpenSimplex2S { return OpenSimplex2S2D(seed, x, y) }
+    if kind == NoiseType.Perlin { return Perlin2D(seed, x, y) }
+    if kind == NoiseType.ValueCubic { return ValueCubic2D(seed, x, y) }
+    if kind == NoiseType.Value { return Value2D(seed, x, y) }
+    return 0
+}
+
+Single3D :: (state: *NoiseState, seed: s32, x: float32, y: float32, z: float32) -> float32 {
+    kind := state.noise_type
+    if kind == NoiseType.OpenSimplex2 { return OpenSimplex23D(seed, x, y, z) }
+    if kind == NoiseType.OpenSimplex2S { return OpenSimplex2S3D(seed, x, y, z) }
+    if kind == NoiseType.Perlin { return Perlin3D(seed, x, y, z) }
+    if kind == NoiseType.ValueCubic { return ValueCubic3D(seed, x, y, z) }
+    if kind == NoiseType.Value { return Value3D(seed, x, y, z) }
+    return 0
+}
+
+// A fractal's running sum and the amplitude of its next octave.
+Fractal :: struct { sum: float32; amp: float32; }
+
+// Adds one octave. FastNoiseLite caps the 2D FBm weight at noise + 1 <= 2
+// but not the 3D one, so CAPPED selects the 2D form.
+Octave :: (state: *NoiseState, noise: float32, fractal: *Fractal, capped: bool) {
+    kind := state.fractal_type
+    if kind == FractalType.FBm {
+        fractal.sum += noise * fractal.amp
+        weight := (noise + 1) * 0.5
+        if capped { weight = Min(noise + 1, 2) * 0.5 }
+        fractal.amp *= Lerp(1.0, weight, state.weighted_strength)
+    } else if kind == FractalType.Ridged {
+        ridge := Abs(noise)
+        fractal.sum += (ridge * -2 + 1) * fractal.amp
+        fractal.amp *= Lerp(1.0, 1 - ridge, state.weighted_strength)
+    } else {
+        bounce := PingPong((noise + 1) * state.ping_pong_strength)
+        fractal.sum += (bounce - 0.5) * 2 * fractal.amp
+        fractal.amp *= Lerp(1.0, bounce, state.weighted_strength)
+    }
+    fractal.amp *= state.gain
+}
+
+// Noise at (x, y), in about -1 to 1.
+Noise2D :: (state: *NoiseState, x: float32, y: float32) -> float32 {
+    px := x * state.frequency; py := y * state.frequency
+    if state.noise_type == NoiseType.OpenSimplex2 || state.noise_type == NoiseType.OpenSimplex2S {
+        SQRT3: float32 = 1.7320508075688772935274463415059
+        F2 := 0.5 * (SQRT3 - 1)
+        t := (px + py) * F2; px += t; py += t
+    }
+    if state.fractal_type == FractalType.None { return Single2D(state, state.seed, px, py) }
+    fractal: Fractal; fractal.amp = FractalBounding(state); seed := state.seed; i: s32 = 0
+    while i < state.octaves {
+        Octave(state, Single2D(state, seed, px, py), *fractal, true)
+        seed += 1; px *= state.lacunarity; py *= state.lacunarity; i += 1
+    }
+    return fractal.sum
+}
+
+// Noise at (x, y, z), in about -1 to 1.
+Noise3D :: (state: *NoiseState, x: float32, y: float32, z: float32) -> float32 {
+    px := x * state.frequency; py := y * state.frequency; pz := z * state.frequency
+    if state.rotation_type_3d == RotationType3D.ImproveXYPlanes {
+        S2: float32 = -0.211324865405187; R: float32 = 0.577350269189626
+        xy := px + py; s2 := xy * S2
+        pz *= R; px += s2 - pz; py = py + s2 - pz; pz += xy * R
+    } else if state.rotation_type_3d == RotationType3D.ImproveXZPlanes {
+        S2: float32 = -0.211324865405187; R: float32 = 0.577350269189626
+        xz := px + pz; s2 := xz * S2
+        py *= R; px += s2 - py; pz += s2 - py; py += xz * R
+    } else if state.noise_type == NoiseType.OpenSimplex2 || state.noise_type == NoiseType.OpenSimplex2S {
+        R3: float32 = 2.0 / 3.0
+        r := (px + py + pz) * R3
+        px = r - px; py = r - py; pz = r - pz
+    }
+    if state.fractal_type == FractalType.None { return Single3D(state, state.seed, px, py, pz) }
+    fractal: Fractal; fractal.amp = FractalBounding(state); seed := state.seed; i: s32 = 0
+    while i < state.octaves {
+        Octave(state, Single3D(state, seed, px, py, pz), *fractal, false)
+        seed += 1; px *= state.lacunarity; py *= state.lacunarity; pz *= state.lacunarity; i += 1
+    }
+    return fractal.sum
+}

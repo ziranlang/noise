@@ -1,0 +1,80 @@
+// Compares noise/fast_noise with values captured once from FastNoiseLite C:
+// OpenSimplex2S FBm (octaves 1-3, lacunarity 1 and 2, gain 0.5, 0.75 and 1),
+// Ridged and PingPong, plus OpenSimplex2, Perlin, ValueCubic, Value, weighted
+// strength, both 3D plane rotations and seed wraparound at 2^31 - 1.
+FastNoise :: #import "fast_noise";
+Vectors :: #import "fast_noise_vectors";
+
+TOLERANCE :: 0.000001;
+
+NoiseTypeAt :: (index: s32) -> FastNoise.NoiseType {
+    if index == 0 { return FastNoise.NoiseType.OpenSimplex2 }
+    if index == 1 { return FastNoise.NoiseType.OpenSimplex2S }
+    if index == 2 { return FastNoise.NoiseType.Perlin }
+    if index == 3 { return FastNoise.NoiseType.ValueCubic }
+    return FastNoise.NoiseType.Value
+}
+
+FractalTypeAt :: (index: s32) -> FastNoise.FractalType {
+    if index == 1 { return FastNoise.FractalType.FBm }
+    if index == 2 { return FastNoise.FractalType.Ridged }
+    if index == 3 { return FastNoise.FractalType.PingPong }
+    return FastNoise.FractalType.None
+}
+
+RotationAt :: (index: s32) -> FastNoise.RotationType3D {
+    if index == 1 { return FastNoise.RotationType3D.ImproveXYPlanes }
+    if index == 2 { return FastNoise.RotationType3D.ImproveXZPlanes }
+    return FastNoise.RotationType3D.None
+}
+
+Configure :: (index: s32) -> FastNoise.NoiseState {
+    state := FastNoise.NoiseCreate()
+    state.noise_type = NoiseTypeAt(Vectors.ConfigType[index])
+    state.fractal_type = FractalTypeAt(Vectors.ConfigFractal[index])
+    state.rotation_type_3d = RotationAt(Vectors.ConfigRotation[index])
+    state.octaves = Vectors.ConfigOctaves[index]
+    state.seed = Vectors.ConfigSeed[index]
+    state.lacunarity = Vectors.ConfigLacunarity[index]
+    state.gain = Vectors.ConfigGain[index]
+    state.weighted_strength = Vectors.ConfigWeighted[index]
+    state.ping_pong_strength = Vectors.ConfigPingPong[index]
+    state.frequency = Vectors.ConfigFrequency[index]
+    return state
+}
+
+Main :: () -> s32 {
+    defaults := FastNoise.NoiseCreate()
+    if defaults.seed != 1337 || defaults.octaves != 3 || defaults.noise_type != FastNoise.NoiseType.OpenSimplex2 || defaults.fractal_type != FastNoise.FractalType.None {
+        print("FAIL NoiseCreate defaults\n"); return 1
+    }
+    failures: s32 = 0; exact: s32 = 0; total: s32 = 0; worst: float64 = 0
+    config: s32 = 0
+    while config < Vectors.CONFIG_COUNT {
+        state := Configure(config)
+        point: s32 = 0
+        while point < Vectors.POINT_COUNT {
+            x := Vectors.PointX[point]; y := Vectors.PointY[point]; z := Vectors.PointZ[point]
+            dimension: s32 = 2
+            while dimension <= 3 {
+                got: float64 = 0; want: float64 = 0
+                if dimension == 2 { got = cast(float64) FastNoise.Noise2D(*state, x, y); want = Vectors.Expected2D[config * Vectors.POINT_COUNT + point] }
+                else { got = cast(float64) FastNoise.Noise3D(*state, x, y, z); want = Vectors.Expected3D[config * Vectors.POINT_COUNT + point] }
+                diff := got - want; if diff < 0 { diff = -diff }
+                if diff > worst { worst = diff }
+                if got == want { exact += 1 }
+                if diff > TOLERANCE {
+                    failures += 1
+                    if failures <= 10 { print("FAIL config % point % %D: got % want %\n", config, point, dimension, got, want) }
+                }
+                total += 1; dimension += 1
+            }
+            point += 1
+        }
+        config += 1
+    }
+    print("FastNoiseLite vectors: % of % exact, max difference %\n", exact, total, worst)
+    if failures > 0 { print("FAIL % values differ by more than 1e-6\n", failures); return 1 }
+    print("FastNoiseLite comparison passed\n")
+    return 0
+}

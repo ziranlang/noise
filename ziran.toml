@@ -1,0 +1,10 @@
+[package]
+name = "noise"
+module_roots = ["src", "tests"]
+
+[toolchain]
+git = "https://github.com/ziranlang/ziran.git"
+ref = "master"
+
+[exports]
+fast_noise = "src/fast_noise.zi"
