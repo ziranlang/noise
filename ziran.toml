@@ -4,7 +4,7 @@ module_roots = ["src", "tests"]
 
 [toolchain]
 git = "https://git.waozi.xyz/ziranlang/ziran.git"
-ref = "6dfa969c4764745cbfcbfbbf1153fb02cb9f1fa1"
+ref = "5462fe2ebf2c3c42663249e47ef99d61f45ff39f"
 
 [exports]
 fast_noise = "src/fast_noise.zi"
