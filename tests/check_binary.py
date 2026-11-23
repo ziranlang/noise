@@ -167,6 +167,8 @@ def main():
             dependency["checked"] = {"profile": profile, "sha256": descriptor[-1], "toolchain": tool_identity}
             saved = lock_path.read_bytes()
             if json.loads(saved) != lock:
+                print(f"expected lock: {json.dumps(lock, sort_keys=True)}", file=sys.stderr)
+                print(f"recorded lock: {json.dumps(json.loads(saved), sort_keys=True)}", file=sys.stderr)
                 raise SystemExit("Package discovery recorded an unexpected library pin")
             subprocess.run([*ziran, "lock", "--offline"], cwd=root, env=env, check=True)
             if lock_path.read_bytes() != saved:
